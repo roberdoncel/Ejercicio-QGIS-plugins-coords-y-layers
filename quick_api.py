@@ -43,6 +43,7 @@ from qgis.core import (QgsCoordinateReferenceSystem,
                        QgsFeature)
 
 
+
 class QuickApi:
     """QGIS Plugin Implementation."""
 
@@ -204,26 +205,36 @@ class QuickApi:
         
         project = QgsProject.instance() #referencia al proyecto activo en QGIS 
 
+        # Recuperamos las capas incluidas en el proyecto. Deberíamos fijarnos en el id para tener un filtro adecuado. Pero solo es un ejemplo
+        # Si no existe creamos una capa Vector para almacenar los datos. Dataprovider = memory. 
+        # Generamos el tipo de geometria y además generamos los campos dirección (almacena el país) y licencia
+        layers = project.mapLayersByName("Capa puntos")
+
+        if len(layers) == 0:
+            layer_out = QgsVectorLayer("Point?crs=EPSG:4326&field=address:string&field=license:string",
+                                           "Capa puntos",
+                                           "memory")
+        else:
+            layer_out = layers[0]
+        
+
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
         result = self.dlg.exec_()
         # See if OK was pressed
         if result:
-            # Cuando pulsamos el botón Aceptar procesamos las coordenadas. Creo que sería mejor meter todo esto en funciones 
+            # Cuando pulsamos el botón Aceptar procesamos las coordenadas. 
             lineedit_text = self.dlg.lineedit_xy.value()
             crs_input = self.dlg.crs_input.crs()
             crs_out = QgsCoordinateReferenceSystem(4326)
-            
-            try:
-                lineedit_yx = [float(coord.strip()) for coord in lineedit_text.split(',')] #tratamos de procesar el input cortandolo por la coma
-            except:
-                QMessageBox.critical(self.iface.mainWindow(),
-                         'QuickAPI error',
-                         "Introduce las coordenadas separadas por comas")
-                return
 
-            point = QgsPointXY(*reversed(lineedit_yx)) #Transformamos el punto en un formato valido para QGIS
+            #Extraemos las coordenadas y generamos un el punto.
+            point = self.get_coords(lineedit_text)
+
+            if isinstance(point, QgsPointXY) == False:
+                exit()
+            
 
             #Si las coordenadas introducidas no están en WGS84, las transformamos a él.
             if crs_input.authid() != 'EPSG:4326':
@@ -232,52 +243,27 @@ class QuickApi:
                                                 project)
                 point_transform = xform.transform(point)
                 point = point_transform
+
             
             #Ahora pasamos a hacer una petición a open street map para que nos devuelva el la dirección correspondiente al punto.
-            #Como user_agent uso el de la web que proporciona el ejercicio. Puede que OSM bloquee otros
-            user_agent = 'PyQGIS@GIS-OPS.com'
-            base_url = 'https://nominatim.openstreetmap.org/reverse'
-            params = {'lat': point.y(), 'lon': point.x(), 'format': 'json'}
+            point_info = self.get_info_from_OSM(point)
 
-            #Este servicio nos devuelve la dirección del punto
-            response = requests.get(url=base_url, params=params, headers={'User-Agent': user_agent})
-            response_json = response.json()
+            if point_info is None:
+                exit()
 
-            #Procesamos la respuesta teniendo en cuenta el status devuelto por el servidor. 
-            if response.status_code == 200:
-                #No debería darse un error con status 200, pero dice la web que puede pasar
-                if response_json.get('error'):
-                    QMessageBox.critical(self.iface.mainWindow(),
-                                         "Quick API error",
-                                         "Petición incorrecta!\n\n"
-                                         "Mensaje:\n"
-                                         "{}".format(response.json()))
-                    return
+            # Creamos la geometría y se la añadimos a la característica
+            point_out = QgsPointXY(point_info['x'], point_info['y'])
+            feature = QgsFeature()
+            feature.setGeometry(QgsGeometry.fromPointXY(point_out))
+            feature.setAttributes([point_info['address'], point_info['license']])
 
-                # Datos devueltos
-                x = float(response_json['lon'])
-                y = float(response_json['lat'])
-                address = response_json['display_name']
-                license = response_json['licence']
+            # Añadimos la característica a la capa de salida y se lo pasamos al mapa
+            layer_out.dataProvider().addFeature(feature)
+            layer_out.updateExtents()
+            project.addMapLayer(layer_out)
 
-                # Creamos una capa Vector para almacenar los datos. Dataprovaider = memory. 
-                # Generamos el tipo de geometria y además generamos los campos dirección (almacena el país) y licencia
-                layer_out = QgsVectorLayer("Point?crs=EPSG:4326&field=address:string&field=license:string",
-                                           "Nominatim Reverse Geocoding",
-                                           "memory")
-
-                # Creamos la geometría y se la añadimos a la característica
-                point_out = QgsPointXY(x, y)
-                feature = QgsFeature()
-                feature.setGeometry(QgsGeometry.fromPointXY(point_out))
-                feature.setAttributes([address, license])
-
-                # Añadimos la característica a la capa de salida y se lo pasamos al mapa
-                layer_out.dataProvider().addFeature(feature)
-                layer_out.updateExtents()
-                project.addMapLayer(layer_out)
-
-                # Construimos un autozoom 
+            # Construimos un autozoom
+            ''' 
                 bbox = [float(coord) for coord in response_json['boundingbox']]
                 min_y, max_y, min_x, max_x = bbox
                 bbox_geom = QgsGeometry.fromPolygonXY([[QgsPointXY(min_x, min_y),
@@ -285,14 +271,65 @@ class QuickApi:
                                                         QgsPointXY(max_x, max_y),
                                                         QgsPointXY(max_x, min_y),
                                                        ]])
-
-                # Transformamos esta caja que delimita el zoom si está en otro sistema de referencia de coordenadas
-                if project.crs().authid() != 'EPSG:4326':
-                    xform = QgsCoordinateTransform(crs_out,
+            '''
+            
+            # Transformamos esta caja que delimita el zoom si está en otro sistema de referencia de coordenadas
+            '''
+            if project.crs().authid() != 'EPSG:4326':
+                xform = QgsCoordinateTransform(crs_out,
                                                    project.crs(),
                                                    project)
-                    bbox_geom.transform(xform)
+                bbox_geom.transform(xform)
 
-                self.iface.mapCanvas().zoomToFeatureExtent(QgsRectangle.fromWkt(bbox_geom.asWkt()))
+            self.iface.mapCanvas().zoomToFeatureExtent(QgsRectangle.fromWkt(bbox_geom.asWkt()))
+            '''
 
-#Sí, habría que haberlo seccionado en funciones. Pero por si había errores era mejor ceñirse a la solución
+
+    def get_coords(self, concatenated_coords):
+        try:
+            yx = [float(coord.strip()) for coord in concatenated_coords.split(',')] #tratamos de procesar el input cortandolo por la coma
+            point = QgsPointXY(*reversed(yx)) #Transformamos el punto en un formato valido para QGIS
+            return point
+        except:
+            QMessageBox.critical(self.iface.mainWindow(),
+                         'QuickAPI error',
+                         "Introduce las coordenadas separadas por comas")
+            return ""
+
+
+    def get_info_from_OSM(self, point):
+        result = {}
+
+        user_agent = 'PyQGIS@GIS-OPS.com'
+        base_url = 'https://nominatim.openstreetmap.org/reverse'
+        params = {'lat': point.y(), 'lon': point.x(), 'format': 'json'}
+
+        #Este servicio nos devuelve la dirección del punto
+        response = requests.get(url=base_url, params=params, headers={'User-Agent': user_agent})
+        response_json = response.json()
+
+        #Procesamos la respuesta teniendo en cuenta el status devuelto por el servidor. 
+        if response.status_code == 200:
+            #No debería darse un error con status 200, pero dice la web que puede pasar
+            if response_json.get('error'):
+                QMessageBox.critical(self.iface.mainWindow(),
+                                         "Quick API error",
+                                         "Petición incorrecta!\n\n"
+                                         "Mensaje:\n"
+                                         "{}".format(response.json()))
+
+                result['x'] = 0
+                result['y'] = 0
+                result['address'] = ""
+                result['license'] = ""
+                return result
+
+            # Datos devueltos
+            result['x'] = float(response_json['lon'])
+            result['y'] = float(response_json['lat'])
+            result['address'] = response_json['display_name']
+            result['license'] = response_json['licence']
+        
+        print(result)
+        
+        return result
